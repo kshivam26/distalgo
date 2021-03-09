@@ -1,0 +1,117 @@
+import sys
+import random
+import enum
+import time
+
+initial_A = -1
+initial_B = (-1, -1)
+
+numOfProcesses = 3
+
+class SWMR_A:
+    A = []
+    def __init__(self, numOfProcesses):
+        A = [initial_A] * numOfProcesses
+
+    def addElement(self, processId, value):
+        A[processId] = value
+
+    def maxA(self):
+        return max(A)
+
+    def findNonDefaultValues(self):
+        result = []
+        for x in A:
+            if (x != initial_A):
+                result.append(x)
+
+class SWMR_B:
+    B = []
+    def __init__(self, numOfProcesses):
+        B = [initial_B] * numOfProcesses
+
+    def addElement(self, processId, value):
+        B[processId] = value
+
+    def maxB(self):
+        return max(B)[1]
+
+    def findNonDefaultValues(self):
+        result = []
+        for x in B:
+            if (x != initial_B):
+                result.append(x)
+
+class adoptCommit(enum.Enum):
+    adopt = 0
+    commit = 1
+
+
+#adoptCommit = adoptCommit()
+A = SWMR_A(3)
+B = SWMR_B(3)
+
+def randomSkewedChoice():
+    myChoices = [0, 1]
+    return random.choices(myChoices, weights=[1, 1])
+
+counter = -1
+
+class Proposer(process):
+    
+    def setup(timeout:float, placeholder:int):
+        self.propNum = (0, self)     # Current proposal(ballot) number
+        self.propVal = self          # Own value to propose
+        self.increment()
+        self.processId = self.count()
+        print("self id is {0}".format(self.count()))
+
+    def increment():
+        global counter
+        counter +=1
+
+    def count():
+        global counter
+        return counter
+    
+
+    def run():
+        choice = randomSkewedChoice()
+        print('{0} is the choice in {1}'.format(choice[0], propVal))
+        # Step A
+        if (choice[0] == 1):
+            A.addElement(processId, propVal)
+            print('{0} was added to A'.format(propVal))
+        else:
+            print('nothing was added to A in {0}'.format(propVal))
+        
+        # adding wait to wait for other processes to complete
+        time.sleep(1)
+        S_A = A.findNonDefaultValues()
+
+
+        # Step B
+        # Should it wait for other processes to complete
+        if (len(S_A) > 0):
+            if (len(S_A) == 1 & S_A[0] == propVal):
+                SWMR_B.addElement(propVal, (adoptCommit.commit, propVal))
+            else:
+                SWMR_B.addElement(propVal, (adoptCommit.adopt, max(S_A)))
+            S_B = B.findNonDefaultValues()
+
+        # Step C
+        if (len(S_B) >0):
+            if (len(S_B) == 1 & S_B[0] == (adoptCommit.commit, propVal)):
+                return (adoptCommit.commit, propVal)
+            elif ((adoptCommit.commit, propVal) in S_B):
+                return (adoptCommit.adopt, propVal)
+            else:
+                return (adoptCommit.adopt, max(S_B)[1])
+
+
+def main():
+    proposers = new (Proposer, num = numOfProcesses)
+    a = 10
+    b = 10
+    setup(proposers, (a, b))
+    start(proposers)
