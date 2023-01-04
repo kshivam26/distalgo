@@ -10,13 +10,12 @@ class LogEntry:
         self.timeStamp = timeStamp
         self.client = client
         self.command = command
-        #self.server = server
 
     def __str__(self):
         sl = ['LogEntry', str(self.timeStamp), str(self.client), str(self.command)]
-        return ':'.join(sl)
+        return ' : '.join(sl)
 
-null_entry = LogEntry(-1,-1,-1)
+null_entry = (-1,-1,-1)
 
 class Server(process):
     def setup(peers, maxTimeout, nfailure, seed):
@@ -30,139 +29,172 @@ class Server(process):
         self.f = nfailure
         self.peers = peers
 
-        self.proposals = {}
-        self.num_proposals = 0
-        
-
-        self.num_state_messages = {}
-        self.states = {}
-        
-        self.num_vote_messages = {}
-        self.votes = {}
+        self.logDict = set()
+    
     
     def run():
-        output("test")
         while True:
-            if not self.requestQ.empty():
+            if self.requestQ.empty():
+                await(some(received(('RequestForward', _))))
+            else:
+                # proposali <- first element in PQi that is not already in log
                 proposal = self.requestQ.get()
+                while proposal in self.logDict:
+                    proposal = self.requestQ.get()
+
+                # output <- WEAK-MVC(proposali, seq)
                 outputMVC = self.WeakMVC(proposal, self.seq)
-                self.log[seq] = outputMVC
-                if outputMVC is not proposal:
-                    self.requestQ.put(proposal)
+
+                # log[seq] <- output
+                # seq <- seq + 1
+                self.log[seq] = LogEntry(outputMVC[0], outputMVC[1], outputMVC[2])
                 seq = seq + 1
-                if outputMVC is not null_entry and outputMVC in self.currentClientPendingRequests:
+                
+                if outputMVC != null_entry:
+                    self.logDict.add(outputMVC)
+                
+                # if output = null_entry or output != proposali
+                # PQi.push(proposali)
+                if outputMVC != proposal:
+                    self.requestQ.put(proposal)
+                
+                if outputMVC in self.currentClientPendingRequests:
                     output(outputMVC, " at index", seq-1, "applied to state machine.")
-                    send(('Reply', outputMVC.command, self), to=outputMVC.client)
+                    send(('Reply', outputMVC[1], self), to=outputMVC[2])
                     self.currentClientPendingRequests.remove(outputMVC)
 
-    def FindReturnValue(v):
-        if v is 1:
-            m = list(self.proposals.keys())[0]
-            for key in self.proposals:
-                if self.proposals[key] > self.proposals[m]:
-                    m = key
-            #m = max(self.proposals, key=self.proposals.get)
-            return m
+    def FindReturnValue(v, seq):
+        # if 𝑣 = 1 then
+        #   Find value 𝑚 that appears ≥ ⌊ 𝑛/2⌋ + 1 times in Proposal messages received in Phase 0
+        #   Return 𝑚
+        # else
+        #   Return ⊥        ⊲return null value
+
+        if v == 1:
+            for m in setof(m, received(('Proposal', m, _seq))):
+                if len(listof(p, received(('Proposal', _m, _seq), from_=p))) >= floor(self.n/2) + 1:
+                    #output("FRV:", m, "count:", len(listof(p, received(('Proposal', _m, _), from_=p))))
+                    return m
         else:
-            return LogEntry(-1, -1, -1)
+            return (-1, -1, -1)
     
     def CommonCoinFlip(p):
         random.seed(self.seed+p)
         return random.random() > 0.5
 
     def WeakMVC(proposal, seq):
-        output = null_entry
+        outputMVC = null_entry
+        #output("WeakMVC proposali:", proposal, "seq:", seq, "len(PQi):", self.requestQ.qsize())
 
+        # Send(Proposal, q) to all, Weak-MVC is invoked with q and seq
         for target in self.peers:
             send(('Proposal', proposal, seq), to=target)
-        # wait until receiving n-f proposal messages
-        await(self.num_proposals >= self.n - self.f)
-        state = 0
-        if self.proposals[proposal] >= floor(n/2) + 1:
+
+        # wait until receiving >= n-f proposal messages
+        await( len(setof(peer, received(('Proposal', _, _seq), from_=peer))) >= self.n - self.f )
+        nproposal = len(setof(peer, received(('Proposal', _proposal, _seq), from_=peer)))
+
+        # if request 𝑞 appears ≥ ⌊ 𝑛 / 2⌋ + 1 times in Proposals then
+        #    state <- 1
+        # else state <- 0
+        if nproposal >= floor(self.n/2) + 1:
             state = 1
+        else:
+            state = 0
+        # p <- 1
         p = 1
+        #output("proposal phase:",proposal, "state:",state, "count:", nproposal)
+        # while true do
         while True:
+            # Send (State, p, state ) to all state can be 0 or 1
             for target in self.peers:
-                send(('State', state, p), to=target)
-            # wait until receiving n-f phase-p state messages
-            await(self.num_state_messages[p] >= self.n - self.f)
-            vote = -1
-            v = list(self.states[p].keys())[0]
-            for key in self.states[p]:
-                if self.states[p][key] > self.states[p][v]:
-                    v = key
-            #v = max(self.states[p], key=self.states[p].get)
-            if self.states[p][v] >= floor(n/2) + 1:
-                vote = v
-            self.votes[p][0] = self.votes[p][1] = 0
-            for target in self.peers:
-                send(('Vote', vote, p), to=target)
+                send(('State', state, p, seq), to=target)
+            # wait until receiving >= n-f phase-p state messages
+            await( len(setof(peer, received(('State', _, _p, _seq), from_=peer))) >= self.n - self.f )
             
-            # wait until receiving n-f phase-p vote messages
-            await(self.num_vote_messages[p] >= self.n - self.f)
-            maxVotes = list(self.votes[p].keys())[0]
-            for key in self.votes[p]:
-                if self.votes[p][key] > self.votes[p][v]:
-                    maxVotes = key
-            #maxVotes = max(self.votes[p], key=self.votes[p].get)
-            if maxVotes >= self.f+1 and maxVotes is not -1:
-                return self.FindReturnValue(maxVotes)
-            elif self.votes[p][0] > 0:
-                state = 0
-            elif self.votes[p][1] > 0:
-                state = 1
+            numState0 = len(setof(peer, received(('State', 0, _p, _seq), from_=peer)))
+            numState1 = len(setof(peer, received(('State', 1, _p, _seq), from_=peer)))
+
+            # if value 𝑣 appears ≥ ⌊ 𝑛/2⌋ + 1 times in States then
+            # 𝑣𝑜𝑡𝑒 ← 𝑣 else 𝑣𝑜𝑡𝑒 ← ? 
+
+            if numState0 >= floor(n/2) + 1:
+                vote = 0
+            elif numState1 >= floor(n/2) + 1:
+                vote = 1
             else:
-                state = self.CommonCoinFlip(p)
+                vote = -1 # ? is represented by -1
+            
+            #output("state phase -",p,"state0:",numState0,"state1:",numState1, "vote:", vote)
+
+            # Send (vote, 𝑝, 𝑣𝑜𝑡𝑒 ) to all
+            for target in self.peers:
+                send(('Vote', vote, p, seq), to=target)
+            
+            # wait until receiving >= n-f phase-p vote messages
+            await( len(setof(peer, received(('Vote', _, _p, _seq), from_=peer))) >= self.n - self.f )
+            #output("vote phase -",p,"vote0:",len(setof(peer, received(('Vote', 0, p), from_=peer))), "vote1:", len(setof(peer, received(('Vote', 1, p), from_=peer))), "vote-1:", len(setof(peer, received(('Vote', -1, p), from_=peer))))
+            
+            vote0 = len(setof(peer, received(('Vote', 0, _p, _seq), from_=peer)))
+            vote1 = len(setof(peer, received(('Vote', 1, _p, _seq), from_=peer)))
+
+            # if a non-? value 𝑣 appears ≥ 𝑓 + 1 times in votes then 
+            #   Return FindReturnValue(𝑣 ) ⊲Termination
+            # else if a non-? value 𝑣 appears at least once in votes then 
+            #   𝑠𝑡𝑎𝑡𝑒 ← 𝑣 
+            # else 
+            #    𝑠𝑡𝑎𝑡𝑒 ← CommonCoinFlip(𝑝)      ⊲𝑝-th coin flip
+
+            if vote0 >= self.f+1:
+                return self.FindReturnValue(0, seq)
+            if vote1 >= self.f+1:
+                return self.FindReturnValue(1, seq)
+            elif vote1 > 0:
+                state = 1
+            elif vote0 > 0:
+                state = 0
+            else:
+                state = int(self.CommonCoinFlip(p))
             p += 1
 
-        return output   
+        return outputMVC   
 
     def receive(msg=('ClientRequest', serial), from_=client):
-        output(serial, " Client Request from ", client)
-        request = LogEntry(time.perf_counter(), serial, client)
+        output( len(setof(c, received(('ClientRequest', _), from_=c)))  )
+        request = (time.perf_counter(), serial, client)
+        output(request, " Client Request from ", client)
         self.currentClientPendingRequests.add(request)
-        self.requestQ.put(request)
         for target in self.peers:
             send(('RequestForward', request), to=target)
     
     def receive(msg=('RequestForward', request), from_=server):
-        # hack to ensure that there is no duplicate in the server sending the broadcast
-        if request not in self.currentClientPendingRequests:
-            self.requestQ.put(request)
+        #output("RequestForward:", request, " from:", server)
+        self.requestQ.put(request)
 
     def receive(msg=('Proposal', proposal, seq), from_=server):
-        self.proposals[proposal]= self.proposals.setdefault(proposal, 0) + 1
-        self.num_proposals += 1
+        #output("Received proposal:", proposal, "for seq:", seq, "from:",server)
+        return
+        
     
-    def receive(msg=('State', state, p), from_=server):
-        if p in self.states:
-            self.states[p][state] = self.states[p].setdefault(state, 0) + 1
-        else:
-            self.states[p] = {state:1}
-        self.num_state_messages[p] = self.num_state_messages.setdefault(p, 0) + 1
+    def receive(msg=('State', state, p, seq), from_=server):
+        #output("Received phase - ",p,"message with state:",state, "from:",server)
+        return
     
-    def receive(msg=('Vote', vote, p), from_=server):
-        if p in self.votes:
-            self.votes[p][vote] = self.votes[p].setdefault(vote, 0) + 1
-        else:
-            self.votes[p] = {vote:1}
-        self.num_vote_messages[p] = self.num_vote_messages.setdefault(p, 0) + 1
+    def receive(msg=('Vote', vote, p, seq), from_=server):
+        return
 
 class Client(process):
     def setup(servers, nrequests, timeout): pass
 
     def run():
+        random.seed(time.perf_counter())
+        
         target = random.choice(servers)
         req = 0
         while req < nrequests:
             send(('ClientRequest', req), to=target)
-            output("sent CR to", target)
-            if await(some(received(('NotLeader', _req, leader)),
-                          has= leader is not None)):
-                debug("Wrong server, changing to", leader)
-                target = leader
-                reset(received)
-            elif some(received(('Reply', _req, _))):
+            #output("sent CR:", req, " to", target)
+            if await(some(received(('Reply', _req, _)))):
                 output("Request", req + 1, "complete.")
                 req += 1
             elif timeout(timeout/1000):
