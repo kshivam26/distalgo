@@ -6,13 +6,12 @@ from math import floor
 
 class LogEntry:
     """Fictional log entries."""
-    def __init__(self, timeStamp, client, command):
-        self.timeStamp = timeStamp
+    def __init__(self, client, command):
         self.client = client
         self.command = command
 
     def __str__(self):
-        sl = ['LogEntry', str(self.timeStamp), str(self.client), str(self.command)]
+        sl = ['LogEntry', str(self.client), str(self.command)]
         return ' : '.join(sl)
 
 null_entry = (-1,-1,-1)
@@ -20,15 +19,15 @@ null_entry = (-1,-1,-1)
 class Server(process):
     def setup(peers, maxTimeout, nfailure, seed):
         self.requestQ = PriorityQueue()
-        self.currentClientPendingRequests = set()
         self.seq = 0
         self.log = {}
         self.seed = seed
+        self.maxTimeout = maxTimeout
 
         self.n = len(peers)
         self.f = nfailure
         self.peers = peers
-
+        
         self.logDict = set()
     
     
@@ -47,7 +46,7 @@ class Server(process):
 
                 # log[seq] <- output
                 # seq <- seq + 1
-                self.log[seq] = LogEntry(outputMVC[0], outputMVC[1], outputMVC[2])
+                self.log[seq] = LogEntry(outputMVC[1], outputMVC[2])
                 seq = seq + 1
                 
                 if outputMVC != null_entry:
@@ -58,10 +57,9 @@ class Server(process):
                 if outputMVC != proposal:
                     self.requestQ.put(proposal)
                 
-                if outputMVC in self.currentClientPendingRequests:
+                if outputMVC in setof( (timestamp, serial, client) , received(('ClientRequest', serial, timestamp), from_=client)):
                     output(self.log[seq-1], " at index", seq-1, "applied to state machine.")
                     send(('Reply', outputMVC[1], self), to=outputMVC[2])
-                    self.currentClientPendingRequests.remove(outputMVC)
 
     def FindReturnValue(v, seq):
         # if 𝑣 = 1 then
@@ -89,8 +87,10 @@ class Server(process):
             send(('Proposal', proposal, seq), to=target)
 
         # wait until receiving >= n-f proposal messages
-        await( len(setof(peer, received(('Proposal', _, _seq), from_=peer))) >= self.n - self.f )
-        numProposals = len(setof(peer, received(('Proposal', _proposal, _seq), from_=peer)))
+        if await( len(setof(peer, received(('Proposal', _, _seq), from_=peer))) >= self.n - self.f ):
+            numProposals = len(setof(peer, received(('Proposal', _proposal, _seq), from_=peer)))
+        elif timeout(self.maxTimeout):
+            return outputMVC
 
         # if request 𝑞 appears ≥ ⌊ 𝑛 / 2⌋ + 1 times in Proposals then
         #    state <- 1
@@ -108,10 +108,11 @@ class Server(process):
             for target in self.peers:
                 send(('State', state, p, seq), to=target)
             # wait until receiving >= n-f phase-p state messages
-            await( len(setof(peer, received(('State', _, _p, _seq), from_=peer))) >= self.n - self.f )
-            
-            numState0 = len(setof(peer, received(('State', 0, _p, _seq), from_=peer)))
-            numState1 = len(setof(peer, received(('State', 1, _p, _seq), from_=peer)))
+            if await( len(setof(peer, received(('State', _, _p, _seq), from_=peer))) >= self.n - self.f ):
+                numState0 = len(setof(peer, received(('State', 0, _p, _seq), from_=peer)))
+                numState1 = len(setof(peer, received(('State', 1, _p, _seq), from_=peer)))
+            elif timeout(self.maxTimeout):
+                return outputMVC
 
             # if value 𝑣 appears ≥ ⌊ 𝑛/2⌋ + 1 times in States then
             #   𝑣𝑜𝑡𝑒 ← 𝑣 
@@ -130,10 +131,11 @@ class Server(process):
                 send(('Vote', vote, p, seq), to=target)
             
             # wait until receiving >= n-f phase-p vote messages
-            await( len(setof(peer, received(('Vote', _, _p, _seq), from_=peer))) >= self.n - self.f )
-            
-            numVote0 = len(setof(peer, received(('Vote', 0, _p, _seq), from_=peer)))
-            numVote1 = len(setof(peer, received(('Vote', 1, _p, _seq), from_=peer)))
+            if await( len(setof(peer, received(('Vote', _, _p, _seq), from_=peer))) >= self.n - self.f ):
+                numVote0 = len(setof(peer, received(('Vote', 0, _p, _seq), from_=peer)))
+                numVote1 = len(setof(peer, received(('Vote', 1, _p, _seq), from_=peer)))
+            elif timeout(self.maxTimeout):
+                return outputMVC
 
             # if a non-? value 𝑣 appears ≥ 𝑓 + 1 times in votes then 
             #   Return FindReturnValue(𝑣 )     ⊲Termination
@@ -156,9 +158,8 @@ class Server(process):
 
         return outputMVC   
 
-    def receive(msg=('ClientRequest', serial), from_=client):
-        request = (time.perf_counter(), serial, client)
-        self.currentClientPendingRequests.add(request)
+    def receive(msg=('ClientRequest', serial, timestamp), from_=client):
+        request = (timestamp, serial, client)
         for target in self.peers:
             send(('RequestForward', request), to=target)
     
@@ -184,7 +185,7 @@ class Client(process):
         target = random.choice(servers)
         req = 0
         while req < nrequests:
-            send(('ClientRequest', req), to=target)
+            send(('ClientRequest', req, time.perf_counter()), to=target)
             if await(some(received(('Reply', _req, _)))):
                 output("Request", req + 1, "complete.")
                 req += 1
@@ -198,8 +199,8 @@ def main():
     nservers = int(sys.argv[1]) if len(sys.argv) > 1 else 5
     nclients = int(sys.argv[2]) if len(sys.argv) > 2 else 3
     nrequests = int(sys.argv[3]) if len(sys.argv) > 3 else 3
-    maxtimeout = int(sys.argv[4]) if len(sys.argv) > 4 else 3000
-    send_failrate = float(sys.argv[5]) if len(sys.argv) > 5 else 0.0
+    maxtimeout = int(sys.argv[4]) if len(sys.argv) > 4 else 1000
+    send_failrate = float(sys.argv[5]) if len(sys.argv) > 5 else 0.00
     nfailure = int(sys.argv[6]) if len(sys.argv) > 6 else floor(nservers/2)
     servers = new(Server, num= nservers, send= send_failrate, )
     setup(servers, (servers, maxtimeout, nfailure, time.perf_counter()))
