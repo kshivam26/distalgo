@@ -32,11 +32,11 @@ class Server(process):
     
     def run():
         while True:
-            ## log compaction running in background
+            ## running log compaction 1/4 times to simulate background task
             #  for each 𝑗-th slot in the 𝑙𝑜𝑔 do 
             #   if 𝑙𝑜𝑔 [ 𝑗 ] has been executed locally then:
             #       truncate 𝑙𝑜𝑔[𝑗] Discard it or take a snapshot
-            if random.randrange(5) == 1 and self.log != {}:
+            if random.randrange(4) == 1 and self.log != {}:
                 last_seq = list(self.log.keys())[-1]
                 self.log = {last_seq:self.log[last_seq]}
             
